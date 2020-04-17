@@ -92,7 +92,7 @@ class LossComputeBase(nn.Module):
     def padding_idx(self):
         return self.criterion.ignore_index
 
-    def _make_shard_state(self, batch, output, range_, attns=None):
+    def _make_shard_state(self, batch, output, range_, attns=None, self_attns=None):
         """
         Make shard state dictionary for shards() to return iterable
         shards for efficient loss computation. Subclass must define
@@ -104,6 +104,9 @@ class LossComputeBase(nn.Module):
                     batch or a trunc of it?
             attns: the attns dictionary returned from the model.
         """
+        return NotImplementedError
+
+    def print_output(self, train, output, target, **kwargs):
         return NotImplementedError
 
     def _compute_loss(self, batch, output, target, **kwargs):
@@ -123,10 +126,13 @@ class LossComputeBase(nn.Module):
                  batch,
                  output,
                  attns,
+                 self_attentions,
                  normalization=1.0,
                  shard_size=0,
                  trunc_start=0,
-                 trunc_size=None):
+                 trunc_size=None,
+                 vocab=None,
+                 train=True):
         """Compute the forward loss, possibly in shards in which case this
         method also runs the backward pass and returns ``None`` as the loss
         value.
@@ -154,17 +160,33 @@ class LossComputeBase(nn.Module):
         Returns:
             A tuple with the loss and a :obj:`onmt.utils.Statistics` instance.
         """
+
+        ################33
+        """
+        if vocab is not None:
+            voc = vocab["ans"].base_field.vocab
+            for sent, slen, par_arc_sz, a, t in zip(batch.ques[0].squeeze(-1), batch.ques[1], batch.ques[2],
+                                                    batch.ans[0].squeeze(-1).permute(1, 0),
+                                                    batch.tgt.squeeze(-1).permute(1, 0)):
+                for i, par_arcs in enumerate(sent):
+                    if i < slen:
+                        print([voc.itos[w.item()] for w in par_arcs])
+                print([voc.itos[w.item()] for w in a], [voc.itos[w.item()] for w in t])
+                print('***************')
+        """
+        ###############
         if trunc_size is None:
             trunc_size = batch.tgt.size(0) - trunc_start
         trunc_range = (trunc_start, trunc_start + trunc_size)
-        shard_state = self._make_shard_state(batch, output, trunc_range, attns)
+        shard_state = self._make_shard_state(batch, output, trunc_range, attns, self_attentions)
         if shard_size == 0:
-            loss, stats = self._compute_loss(batch, **shard_state)
+            loss, stats = self._compute_loss(batch, self_attentions, **shard_state)
             return loss / float(normalization), stats
         batch_stats = onmt.utils.Statistics()
+
         for shard in shards(shard_state, shard_size):
-            loss, stats = self._compute_loss(batch, **shard)
-            loss.div(float(normalization)).backward()
+            loss, stats = self._compute_loss(batch, self_attentions, **shard)
+            loss.div(float(normalization)).backward(retain_graph=True)
             batch_stats.update(stats)
         return None, batch_stats
 
@@ -232,7 +254,7 @@ class NMTLossCompute(LossComputeBase):
         self.lambda_coverage = lambda_coverage
         self.lambda_align = lambda_align
 
-    def _make_shard_state(self, batch, output, range_, attns=None):
+    def _make_shard_state(self, batch, output, range_, attns=None, self_attentions=None):
         shard_state = {
             "output": output,
             "target": batch.tgt[range_[0] + 1: range_[1], :, 0],
@@ -241,6 +263,7 @@ class NMTLossCompute(LossComputeBase):
             coverage = attns.get("coverage", None)
             std = attns.get("std", None)
             assert attns is not None
+            assert self_attentions is not None
             assert std is not None, "lambda_coverage != 0.0 requires " \
                 "attention mechanism"
             assert coverage is not None, "lambda_coverage != 0.0 requires " \
@@ -248,8 +271,10 @@ class NMTLossCompute(LossComputeBase):
 
             shard_state.update({
                 "std_attn": attns.get("std"),
-                "coverage_attn": coverage
+                "coverage_attn": coverage,
+                #"self_attentions": self_attentions
             })
+
         if self.lambda_align != 0.0:
             # attn_align should be in (batch_size, pad_tgt_size, pad_src_size)
             attn_align = attns.get("align", None)
@@ -274,6 +299,49 @@ class NMTLossCompute(LossComputeBase):
                 "ref_align": ref_align[:, range_[0] + 1: range_[1], :]
             })
         return shard_state
+
+
+    def print_output(self, train, output, target, source, answer):
+        scores = self.generator(self._bottle(output))
+        gtruth = target.view(-1)
+        l, b_sz = target.size()
+        l_src, b_sz_src = source.size()
+        l_ans, b_sz_ans = answer.size()
+
+        assert b_sz == b_sz_src
+        assert b_sz == b_sz_ans
+
+        if not train:
+            pred = scores.data.max(1)[1]
+            gtruth_data = target.view(-1).data
+            src_data = source.view(-1).data
+            ans_data = answer.view(-1).data
+
+            pred = pred.view(l, b_sz)
+            gtruth_data = gtruth_data.view(l, b_sz)
+            src_data = src_data.view(l_src, b_sz_src)
+            ans_data = ans_data.view(l_ans, b_sz_ans)
+
+            for i in range(b_sz):
+                b_sent = []
+                b_sent_pred = []
+                b_sent_src = []
+                b_sent_ans = []
+
+                for j in range(l):
+                    b_sent.append(self.tgt_vocab.itos[gtruth_data[j][i]])
+                    b_sent_pred.append(self.tgt_vocab.itos[pred[j][i]])
+
+                for j in range(l_ans):
+                    b_sent_ans.append(self.src_vocab.itos[ans_data[j][i]])
+                for j in range(l_src):
+                    b_sent_src.append(self.src_vocab.itos[src_data[j][i]])
+
+                print("question: " + " ".join(b_sent_src))
+                print("Answer: " + " ".join(b_sent_ans))
+                print("groundtruth: " + " ".join(b_sent))
+                print("prediction: " + " ".join(b_sent_pred))
+                print("\n\n")
 
     def _compute_loss(self, batch, output, target, std_attn=None,
                       coverage_attn=None, align_head=None, ref_align=None):
@@ -324,10 +392,10 @@ def filter_shard_state(state, shard_size=None):
         if v is not None:
             v_split = []
             if isinstance(v, torch.Tensor):
-                for v_chunk in torch.split(v, shard_size):
-                    v_chunk = v_chunk.data.clone()
-                    v_chunk.requires_grad = v.requires_grad
-                    v_split.append(v_chunk)
+                    for v_chunk in torch.split(v, shard_size):
+                        v_chunk = v_chunk.data.clone()
+                        v_chunk.requires_grad = v.requires_grad
+                        v_split.append(v_chunk)
             yield k, (v, v_split)
 
 
@@ -375,7 +443,17 @@ def shards(state, shard_size, eval_only=False):
         variables = []
         for k, (v, v_split) in non_none.items():
             if isinstance(v, torch.Tensor) and state[k].requires_grad:
-                variables.extend(zip(torch.split(state[k], shard_size),
+                    variables.extend(zip(torch.split(state[k], shard_size),
                                      [v_chunk.grad for v_chunk in v_split]))
+
         inputs, grads = zip(*variables)
-        torch.autograd.backward(inputs, grads)
+
+        #print(len(inputs))
+        """
+        for i, inp in enumerate(inputs):
+            print('input size', inp.size())
+            print('grads size', grads[i].size())
+
+        """
+        torch.autograd.backward(inputs, grads, retain_graph=True)
+        #print('**************************')

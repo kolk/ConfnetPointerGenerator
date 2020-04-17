@@ -92,7 +92,7 @@ class CopyGenerator(nn.Module):
         self.linear_copy = nn.Linear(input_size, 1)
         self.pad_idx = pad_idx
 
-    def forward(self, hidden, attn, src_map):
+    def forward(self, hidden, attn, src_map, self_attn):
         """
         Compute a distribution over the target dictionary
         extended by the dynamic dictionary implied by copying
@@ -110,7 +110,10 @@ class CopyGenerator(nn.Module):
         # CHECKS
         batch_by_tlen, _ = hidden.size()
         batch_by_tlen_, slen = attn.size()
-        slen_, batch, cvocab = src_map.size()
+        qlen, batch, max_par_arc = self_attn.size()
+        slen_, batch, max_par_arc_, cvocab = src_map.size()
+        src_map = src_map[:,:, :max_par_arc,:]
+
         aeq(batch_by_tlen, batch_by_tlen_)
         aeq(slen, slen_)
 
@@ -124,9 +127,18 @@ class CopyGenerator(nn.Module):
         # Probability of not copying: p_{word}(w) * (1 - p(z))
         out_prob = torch.mul(prob, 1 - p_copy)
         mul_attn = torch.mul(attn, p_copy)
+
+        sattn = self_attn.permute(1,0,2)
+        sattn = sattn.unsqueeze(-1).expand((batch,qlen,max_par_arc,cvocab))
+        src_map_ques = sattn*src_map.permute(1,0,2,3)[:,:qlen,:,:]
+        ques_src_map = torch.sum(src_map_ques, dim=2)
+        #ans_src_map = torch.sum(src_map[qlen:,:,:,:], dim=2)
+        ans_src_map = src_map[qlen:, :, 0, :]
+        final_src_map = torch.cat((ques_src_map, ans_src_map.permute(1,0,2)), dim=1)
+
         copy_prob = torch.bmm(
             mul_attn.view(-1, batch, slen).transpose(0, 1),
-            src_map.transpose(0, 1)
+            final_src_map
         ).transpose(0, 1)
         copy_prob = copy_prob.contiguous().view(-1, cvocab)
         return torch.cat([out_prob, copy_prob], 1)
@@ -154,7 +166,11 @@ class CopyGeneratorLoss(nn.Module):
         """
         # probabilities assigned by the model to the gold targets
         vocab_probs = scores.gather(1, target.unsqueeze(1)).squeeze(1)
-
+        """
+        print('scores size', scores.size())
+        print('target size', target.size())
+        print('vocab size', vocab_probs.size())
+        """
         # probability of tokens copied from source
         copy_ix = align.unsqueeze(1) + self.vocab_size
         copy_tok_probs = scores.gather(1, copy_ix).squeeze(1)
@@ -174,6 +190,7 @@ class CopyGeneratorLoss(nn.Module):
         loss = -probs.log()  # just NLLLoss; can the module be incorporated?
         # Drop padding.
         loss[target == self.ignore_index] = 0
+        #print('copy generator criterion size', loss.size())
         return loss
 
 
@@ -186,22 +203,26 @@ class CopyGeneratorLossCompute(NMTLossCompute):
         self.tgt_vocab = tgt_vocab
         self.normalize_by_length = normalize_by_length
 
-    def _make_shard_state(self, batch, output, range_, attns):
+    def _make_shard_state(self, batch, output, range_, attns, self_attentions):
         """See base class for args description."""
         if getattr(batch, "alignment", None) is None:
             raise AssertionError("using -copy_attn you need to pass in "
                                  "-dynamic_dict during preprocess stage.")
 
         shard_state = super(CopyGeneratorLossCompute, self)._make_shard_state(
-            batch, output, range_, attns)
+            batch, output, range_, attns, self_attentions)
 
         shard_state.update({
             "copy_attn": attns.get("copy"),
-            "align": batch.alignment[range_[0] + 1: range_[1]]
+            "align": batch.alignment[range_[0] + 1: range_[1]],
+            #"self_attention": self_attentions
         })
+        #print('std_attns size', attns.get('std').size())
+        #print('align size', shard_state["align"].size())
+        #print('self_attentions size', self_attentions.size())
         return shard_state
 
-    def _compute_loss(self, batch, output, target, copy_attn, align,
+    def _compute_loss(self, batch, self_attention, output, target, copy_attn, align,
                       std_attn=None, coverage_attn=None):
         """Compute the loss.
 
@@ -217,9 +238,11 @@ class CopyGeneratorLossCompute(NMTLossCompute):
         target = target.view(-1)
         align = align.view(-1)
         scores = self.generator(
-            self._bottle(output), self._bottle(copy_attn), batch.src_map
+            self._bottle(output), self._bottle(copy_attn), batch.src_map, self_attention
         )
         loss = self.criterion(scores, align, target)
+        #print('copy generator loss', loss)
+        #print('copy genetor loss size', loss.size())
 
         if self.lambda_coverage != 0.0:
             coverage_loss = self._compute_coverage_loss(std_attn,

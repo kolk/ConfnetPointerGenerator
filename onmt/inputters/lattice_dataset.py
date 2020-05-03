@@ -47,6 +47,8 @@ class LatticeDataReader(DataReaderBase):
 
     @classmethod
     def read_confnet_file(cls, filename):
+        max_par_arc = 20
+        max_sent_len = 50
         with open(filename) as f:
             lines = f.readlines()
             lines = lines[3:]
@@ -55,9 +57,19 @@ class LatticeDataReader(DataReaderBase):
             lens = []
             for i, par_arc in enumerate(lines):
                 arcs = par_arc.split(' ')[2:]
-                text.append(arcs[::2])
-                scores.append([float(i.strip()) for i in arcs[1::2]])
-                lens.append(len(arcs[::2]))
+                text.append(arcs[:max_par_arc:2])
+                scores.append([float(j.strip()) for j in arcs[1:max_par_arc:2]])
+                lens.append(len(arcs[:max_par_arc:2]))
+                assert len(text) == len(scores) == len(lens), "par_arc_lens not equal"
+            # text.append(['</s>'] + ['<blank>']*(max_par_arc-1))
+            # scores.append([1.0]+[0.0]*(max_par_arc-1))
+            text.extend([['<blank>'] * (max_par_arc)] * (max_sent_len - len(text)))
+            scores.extend([[0.0] * (max_par_arc)] * (max_sent_len - len(scores)))
+            lens.extend([[0] * (max_par_arc)] * (max_sent_len - len(lens)))
+            # text.extend(['<blank>'] * (max_sent_len - len(text)))
+            # scores.extend([0.0] * (max_sent_len - len(text)))
+            # lens.extend([0] * (max_sent_len - len(text)))
+
         return text, scores, lens
 
 def lattice_sort_key(ex):

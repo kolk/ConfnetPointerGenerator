@@ -111,11 +111,13 @@ class CopyGenerator(nn.Module):
         batch_by_tlen, _ = hidden.size()
         batch_by_tlen_, slen = attn.size()
         qlen, batch, max_par_arc = self_attn.size()
-        slen_, batch, max_par_arc_, cvocab = src_map.size()
+        slen_, batch_, max_par_arc_, cvocab = src_map.size()
         src_map = src_map[:,:, :max_par_arc,:]
 
         aeq(batch_by_tlen, batch_by_tlen_)
         aeq(slen, slen_)
+        #print('batch', batch, 'batch_', batch_)
+        assert batch == batch_, "batch size of self-attention doesnt match src_map"
 
         # Original probabilities.
         logits = self.linear(hidden)
@@ -128,9 +130,9 @@ class CopyGenerator(nn.Module):
         out_prob = torch.mul(prob, 1 - p_copy)
         mul_attn = torch.mul(attn, p_copy)
 
-        sattn = self_attn.permute(1,0,2)
-        sattn = sattn.unsqueeze(-1).expand((batch,qlen,max_par_arc,cvocab))
-        src_map_ques = sattn*src_map.permute(1,0,2,3)[:,:qlen,:,:]
+        sattn = self_attn.permute(1, 0, 2)
+        sattn = sattn.unsqueeze(-1).expand((batch, qlen, max_par_arc, cvocab))
+        src_map_ques = sattn*src_map.permute(1, 0, 2, 3)[:, :qlen, :, :]
         ques_src_map = torch.sum(src_map_ques, dim=2)
         #ans_src_map = torch.sum(src_map[qlen:,:,:,:], dim=2)
         ans_src_map = src_map[qlen:, :, 0, :]

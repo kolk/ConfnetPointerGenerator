@@ -36,7 +36,7 @@ class TranslationBuilder(object):
         self.phrase_table = phrase_table
         self.has_tgt = has_tgt
 
-    def _build_target_tokens(self, ques, ans, src_vocab, ques_raw, ans_raw, pred, attn):
+    def _build_target_tokens(self, ques, ans, self_attention, src_vocab, ques_raw, ans_raw, pred, attn):
         tgt_field = dict(self.fields)["tgt"].base_field
         vocab = tgt_field.vocab
         tokens = []
@@ -56,7 +56,10 @@ class TranslationBuilder(object):
                     #########################
                     if max_index < len(ques_raw):
                         ###########33 need to change for confnet self-attention ##################
-                        tokens[i] = ques_raw[max_index.item()][0]
+
+                        par_arcs = ques_raw[max_index.item()]
+                        _, max_par_arc_index = self_attention[max_index.item(), :len(par_arcs)].max(0)
+                        tokens[i] = par_arcs[max_par_arc_index]
                     else:
                         tokens[i] = ans_raw[max_index.item()-len(ques_raw)]
                     #tokens[i] = src_raw[max_index.item()]
@@ -75,10 +78,12 @@ class TranslationBuilder(object):
                len(translation_batch["predictions"]))
         batch_size = batch.batch_size
 
+        self_attention = translation_batch["self_attention"]
         preds, pred_score, attn, align, gold_score, indices = list(zip(
             *sorted(zip(translation_batch["predictions"],
                         translation_batch["scores"],
                         translation_batch["attention"],
+                        #translation_batch["self_attention"],
                         translation_batch["alignment"],
                         translation_batch["gold_score"],
                         batch.indices.data),
@@ -104,15 +109,18 @@ class TranslationBuilder(object):
             if self._has_text_ans:
                 src_vocab = self.data.src_vocabs[inds[b]] \
                     if self.data.src_vocabs else None
+                sattention = self_attention[:, b, :]
                 ans_raw = self.data.examples[inds[b]].ans[0]
                 ques_raw = self.data.examples[inds[b]].ques[0]
             else:
                 src_vocab = None
                 ques_raw = None
                 ans_raw = None
+                sattention = self_attention[:, b, :]
             pred_sents = [self._build_target_tokens(
                 ques[b, :, :] if ques is not None else None,
                 ans[:, b] if ans is not None else None,
+                sattention,
                 src_vocab, ques_raw, ans_raw,
                 preds[b][n], attn[b][n])
                 for n in range(self.n_best)]
@@ -124,6 +132,7 @@ class TranslationBuilder(object):
                 gold_sent = self._build_target_tokens(
                     ques[b, :, :] if ques is not None else None,
                     ans[:, b] if ans is not None else None,
+                    sattention,
                     src_vocab, ques_raw, ans_raw,
                     tgt[1:, b] if tgt is not None else None, None)
             print('gold_sent', gold_sent)

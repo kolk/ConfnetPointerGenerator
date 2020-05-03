@@ -93,7 +93,7 @@ class BeamSearch(DecodeStrategy):
             not stepwise_penalty and self.global_scorer.has_cov_pen)
         self._cov_pen = self.global_scorer.has_cov_pen
 
-    def initialize(self, memory_bank, src_lengths, src_map=None, device=None):
+    def initialize(self, memory_bank, src_lengths, src_map=None, self_attention=None, device=None):
         """Initialize for decoding.
         Repeat src objects `beam_size` times.
         """
@@ -110,6 +110,8 @@ class BeamSearch(DecodeStrategy):
             mb_device = memory_bank.device
         if src_map is not None:
             src_map = tile(src_map, self.beam_size, dim=1)
+        if self_attention is not None:
+            self_attention = tile(self_attention, self.beam_size, dim=1)
         if device is None:
             device = mb_device
 
@@ -131,7 +133,7 @@ class BeamSearch(DecodeStrategy):
                                     dtype=torch.long, device=device)
         self._batch_index = torch.empty([self.batch_size, self.beam_size],
                                         dtype=torch.long, device=device)
-        return fn_map_state, memory_bank, self.memory_lengths, src_map
+        return fn_map_state, memory_bank, self.memory_lengths, src_map, self_attention
 
     @property
     def current_predictions(self):

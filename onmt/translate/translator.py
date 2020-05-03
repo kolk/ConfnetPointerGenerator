@@ -17,7 +17,7 @@ from onmt.translate.greedy_search import GreedySearch
 from onmt.utils.misc import tile, set_random_seed, report_matrix
 from onmt.utils.alignment import extract_alignment, build_align_pharaoh
 from onmt.modules.copy_generator import collapse_copy_scores
-
+from onmt.utils.misc import aeq
 
 def build_translator(opt, report_score=True, logger=None, out_file=None):
     if out_file is None:
@@ -273,11 +273,13 @@ class Translator(object):
             print(msg)
 
     def _gold_score(self, batch, memory_bank, src_lengths, src_vocabs,
-                    use_src_map, enc_states, batch_size, src):
+                    use_src_map, enc_states, batch_size, src,
+                    self_attention=None):
         if "tgt" in batch.__dict__:
             gs = self._score_target(
                 batch, memory_bank, src_lengths, src_vocabs,
-                batch.src_map if use_src_map else None)
+                batch.src_map if use_src_map else None,
+                self_attention)
             self.model.decoder.init_state(src, memory_bank, enc_states)
         else:
             gs = [0] * batch_size
@@ -355,9 +357,12 @@ class Translator(object):
         start_time = time.time()
 
         for batch in data_iter:
+            #print('batch src map data_iter in translate', batch.src_map.size())
             batch_data = self.translate_batch(
                 batch, data.src_vocabs, attn_debug
             )
+            #print('batch data self_attention size', batch_data["self_attention"].size())
+            #print("batch data predictions size", len(batch_data["predictions"]))
             translations = xlation_builder.from_batch(batch_data)
 
             for trans in translations:
@@ -520,6 +525,7 @@ class Translator(object):
 
     def translate_batch(self, batch, src_vocabs, attn_debug):
         """Translate a batch of sentences."""
+        #print('batch src map translate_batch', batch.src_map.size())
         with torch.no_grad():
             if self.beam_size == 1:
                 decode_strategy = GreedySearch(
@@ -600,7 +606,8 @@ class Translator(object):
             memory_lengths,
             src_map=None,
             step=None,
-            batch_offset=None):
+            batch_offset=None,
+            self_attention=None):
         if self.copy_attn:
             # Turn any copied words into UNKs.
             decoder_in = decoder_in.masked_fill(
@@ -626,9 +633,11 @@ class Translator(object):
             # or [ tgt_len, batch_size, vocab ] when full sentence
         else:
             attn = dec_attn["copy"]
+            #print('src_map size in decode_and_generate ', src_map.size())
             scores = self.model.generator(dec_out.view(-1, dec_out.size(2)),
                                           attn.view(-1, attn.size(2)),
-                                          src_map)
+                                          src_map,
+                                          self_attention)
             # here we have scores [tgt_lenxbatch, vocab] or [beamxbatch, vocab]
             if batch_offset is None:
                 scores = scores.view(-1, batch.batch_size, scores.size(-1))
@@ -679,21 +688,31 @@ class Translator(object):
             "scores": None,
             "attention": None,
             "batch": batch,
+            "self_attention": self_attention,
             "gold_score": self._gold_score(
                 batch, memory_bank, src_lengths, src_vocabs, use_src_map,
-                enc_states, batch_size, src)}
+                enc_states, batch_size, src, self_attention)}
 
         # (2) prep decode_strategy. Possibly repeat src objects.
         src_map = batch.src_map if use_src_map else None
-        fn_map_state, memory_bank, memory_lengths, src_map = \
-            decode_strategy.initialize(memory_bank, src_lengths, src_map)
+        print('translate_with_strategy src_map', src_map.size())
+        fn_map_state, memory_bank, memory_lengths, src_map, self_attention = \
+            decode_strategy.initialize(memory_bank, src_lengths, src_map, self_attention)
+
+        #print('translate_with_strategy after decode_Strategy src_map', src_map.size())
+        prev_src_map = src_map
+        self_attention_ = self_attention
+        #print('**************************')
         if fn_map_state is not None:
             self.model.decoder.map_state(fn_map_state)
 
         # (3) Begin decoding step by step:
         for step in range(decode_strategy.max_length):
             decoder_input = decode_strategy.current_predictions.view(1, -1, 1)
-
+            #print('src_map in step ', step, src_map.size())
+            #print('src_map', src_map)
+            #print('equal ', torch.all(torch.eq(prev_src_map, src_map)))
+            prev_src_map = src_map
             log_probs, attn = self._decode_and_generate(
                 decoder_input,
                 memory_bank,
@@ -703,7 +722,7 @@ class Translator(object):
                 src_map=src_map,
                 step=step,
                 batch_offset=decode_strategy.batch_offset,
-                self_attention=self_attention)
+                self_attention=self_attention_)
 
             decode_strategy.advance(log_probs, attn)
             any_finished = decode_strategy.is_finished.any()
@@ -726,6 +745,7 @@ class Translator(object):
 
                 if src_map is not None:
                     src_map = src_map.index_select(1, select_indices)
+                    self_attention_ = self_attention_.index_select(1, select_indices)
 
             if parallel_paths > 1 or any_finished:
                 self.model.decoder.map_state(
@@ -734,21 +754,24 @@ class Translator(object):
         results["scores"] = decode_strategy.scores
         results["predictions"] = decode_strategy.predictions
         results["attention"] = decode_strategy.attention
+        results["self_attention"] = self_attention
         if self.report_align:
             results["alignment"] = self._align_forward(
                 batch, decode_strategy.predictions)
         else:
             results["alignment"] = [[] for _ in range(batch_size)]
+        #print('self attention size', results["self_attention"].size())
         return results
 
     def _score_target(self, batch, memory_bank, src_lengths,
-                      src_vocabs, src_map):
+                      src_vocabs, src_map, self_attention):
         tgt = batch.tgt
         tgt_in = tgt[:-1]
 
         log_probs, attn = self._decode_and_generate(
             tgt_in, memory_bank, batch, src_vocabs,
-            memory_lengths=src_lengths, src_map=src_map)
+            memory_lengths=src_lengths, src_map=src_map,
+            self_attention=self_attention)
 
         log_probs[:, :, self._tgt_pad_idx] = 0
         gold = tgt[1:]

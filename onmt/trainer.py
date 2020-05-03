@@ -365,7 +365,7 @@ class Trainer(object):
             assert torch.all(torch.eq(ques_lengths.type(torch.LongTensor), ques_score_lengths.type(torch.LongTensor))), "Confnet arc and score lengths not same"
             #print('par_arc_lengths', par_arc_lengths)
             #print('par_arc_lengths_', par_arc_lengths_)
-            assert torch.all(torch.eq(par_arc_lengths.type(torch.LongTensor), par_arc_lengths_.type(torch.LongTensor))), "Confnet parallel arc lengths not same"
+            assert torch.all(torch.eq(par_arc_lengths.type(torch.LongTensor), par_arc_lengths_.type(torch.LongTensor))), "Confnet parallel arc lengths amd score parallel arc lengths not same"
             ans, ans_lengths = batch.ans if isinstance(batch.ans, tuple) \
                 else (batch.ans, None)
             #print("ques_lengths is not None", ques_lengths is not None)

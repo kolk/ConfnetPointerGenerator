@@ -1,9 +1,6 @@
-# Full length Answer Generation from Spoken Questions
-# Based on OpenNMT-py: Open-Source Neural Machine Translation
+# Hierarchical pointer-generator on Confusion Network: Natural Answer Generation from Speech
 
-Code base for paper.The dataset is contained in data directory. train.ques, train.ans, train.tgt contains data triplet (question, factoid answer, target full length answer) in each line respectively.
-
-The codebase is built over [OpenNMT](https://github.com/OpenNMT/OpenNMT)
+Code base for paper Hierarchical pointer-generator on Confusion Network: Natural AnswerGeneration from Speech.
 
 ## Requirements
 All dependencies can be installed via:
@@ -11,6 +8,7 @@ All dependencies can be installed via:
 ```bash
 pip install -r requirements.txt
 ```
+
 ### Step 1a: Add padding:
 Pad the answer text file.
 ```
@@ -59,6 +57,5 @@ onmt_translate -model demo-model_acc_XX.XX_ppl_XXX.XX_eX.pt -ques data/ques-test
 ```
 
 ## Acknowledgements
+The codebase is built over [OpenNMT](https://github.com/OpenNMT/OpenNMT). OpenNMT-py is run as a collaborative open-source project.
 
-OpenNMT-py is run as a collaborative open-source project.
-The original code was written by [Adam Lerer](http://github.com/adamlerer) (NYC) to reproduce OpenNMT-Lua using Pytorch.
